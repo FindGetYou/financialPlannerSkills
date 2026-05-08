@@ -1,0 +1,60 @@
+# 财务风险嗅探 — 新闻源配置模板
+# 
+# 按资产类别分组，每组包含该类别最相关的新闻源。
+# sniff_setup.py 的 map_sources() 根据关键词的 category 在此查表。
+# 
+# 自定义：添加/删除源、替换 URL、增删类别。格式保持一致即可。
+
+宏观经济:
+  - name: 财联社
+    url: https://www.cls.cn/telegraph
+    type: web
+    description: 7×24 快讯，金融突发新闻首发
+  - name: 华尔街见闻
+    url: https://wallstreetcn.com/news/global
+    type: web
+    description: 深度宏观分析、全球市场
+
+A股/指数:
+  - name: 东方财富
+    url: https://finance.eastmoney.com/a/czqyw.html
+    type: web
+    description: A股要闻、大盘数据、龙虎榜
+  - name: 新浪财经
+    url: https://finance.sina.com.cn/stock/
+    type: web
+    description: 股票频道、行业板块分析
+  - name: 雪球
+    url: https://xueqiu.com/today
+    type: web
+    description: 投资者社区、热门讨论
+
+基金/债券:
+  - name: 天天基金
+    url: https://fund.eastmoney.com/news/czqyw.html
+    type: web
+    description: 基金新闻、净值变动、经理变更
+  - name: 中国债券信息网
+    url: https://www.chinabond.com.cn/cb/cn/xwgg/ggtz/zyjsgs/ywgg/
+    type: web
+    description: 国债发行、债市公告
+
+房地产:
+  - name: 新浪财经-地产
+    url: https://finance.sina.com.cn/china/realestate/
+    type: web
+    description: 房地产新闻、政策解读
+  - name: 华尔街见闻-地产
+    url: https://wallstreetcn.com/topics/realestate
+    type: web
+    description: 专题分析
+
+保险:
+  - name: 财经网-保险
+    url: https://finance.caijing.com.cn/insurance/
+    type: web
+    description: 保险行业新闻、监管动态
+  - name: 新浪财经-保险
+    url: https://finance.sina.com.cn/insurance/
+    type: web
+    description: 保险公司、产品评测
