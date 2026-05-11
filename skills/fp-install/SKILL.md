@@ -1,6 +1,6 @@
 ---
 name: fp-install
-description: 安装私人财务规划师——复制 skills 到 AI 平台目录，初始化数据和公共组件
+description: 安装私人财务规划师——复制 skills 到 AI 平台目录，初始化数据和公共组件。用于首次安装或重新部署财务规划师 skills 包，当用户说"安装财务规划师"时使用。
 ---
 
 # 安装财务规划师（fp-install）

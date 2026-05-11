@@ -1,6 +1,6 @@
 ---
 name: fp-calculator
-description: 财务规划纯计算模块，被其他 skill 调用，不做对话交互
+description: 财务规划纯计算模块——复利、退休缺口、保额、税务、资产配置等数值计算。用于所有涉及金额和数字的财务计算，被其他 skill 内部调用，不直接面向用户对话。
 ---
 
 # 财务计算器（fp-calculator）
