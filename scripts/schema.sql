@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS asset_records (
     hold_quantity   REAL,                                  -- 持仓数量（股数/份额），保险类为 NULL
     holding_amount  REAL NOT NULL,                         -- 持仓市值（元）
     profit_amount   REAL NOT NULL DEFAULT 0,               -- 持有收益（元）
+    return_rate     REAL,                                    -- 持有收益率（小数，可为 NULL）
     record_date     TEXT NOT NULL,                         -- 记录日期 YYYY-MM-DD
     notes           TEXT DEFAULT '',
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
@@ -63,17 +64,22 @@ CREATE TABLE IF NOT EXISTS plan_tasks (
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- 风险嗅探配置
-CREATE TABLE IF NOT EXISTS risk_sniff_config (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    plan_id         INTEGER NOT NULL REFERENCES financial_plan(id),
-    keyword         TEXT NOT NULL,                             -- 嗅探关键词
-    source_urls     TEXT NOT NULL DEFAULT '[]',                -- JSON，新闻源 URL 列表
-    frequency       TEXT NOT NULL DEFAULT 'daily',             -- daily / weekly / monthly
-    priority        TEXT NOT NULL DEFAULT 'medium',            -- high / medium / low
-    active          INTEGER NOT NULL DEFAULT 1,                -- 0=停用 / 1=启用
-    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+-- 复盘日记
+CREATE TABLE IF NOT EXISTS review_diaries (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id             INTEGER NOT NULL REFERENCES financial_plan(id),
+    review_date         TEXT NOT NULL,              -- YYYY-MM-DD
+    snapshot_prev       TEXT,                       -- 上一次快照日期
+    snapshot_curr       TEXT NOT NULL,              -- 当前快照日期
+    net_worth_change    REAL NOT NULL DEFAULT 0,    -- 净资产变化额
+    net_worth_change_pct REAL NOT NULL DEFAULT 0,  -- 净资产变化率
+    drift_max           REAL,                       -- 最大偏离度
+    rebalance_needed    INTEGER NOT NULL DEFAULT 0, -- 0/1
+    highlights          TEXT NOT NULL DEFAULT '[]', -- JSON，亮点列表
+    concerns            TEXT NOT NULL DEFAULT '[]', -- JSON，关注点列表
+    detail_json         TEXT NOT NULL DEFAULT '{}', -- JSON，完整复盘数据
+    narrative           TEXT,                       -- 文字总结（长文本）
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- 索引
@@ -84,4 +90,5 @@ CREATE INDEX IF NOT EXISTS idx_assets_record_date ON asset_records(record_date);
 CREATE INDEX IF NOT EXISTS idx_plan_status ON financial_plan(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON plan_tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_plan_id ON plan_tasks(plan_id);
-CREATE INDEX IF NOT EXISTS idx_sniff_plan_id ON risk_sniff_config(plan_id);
+CREATE INDEX IF NOT EXISTS idx_review_plan_id ON review_diaries(plan_id);
+CREATE INDEX IF NOT EXISTS idx_review_date ON review_diaries(review_date);

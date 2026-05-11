@@ -10,8 +10,8 @@
         get_profile_summary, upsert_profile_field, batch_confirm_fields,
         get_active_plan, create_plan, update_plan_status,
         get_pending_tasks, create_task, update_task_status,
-        get_sniff_configs, upsert_sniff_config,
         add_asset_record, get_asset_records,
+        create_review, get_reviews, get_latest_review,
     )
 """
 
@@ -225,7 +225,7 @@ def batch_confirm_fields(field_names):
 
 def add_asset_record(product_code, product_name, asset_type, holding_amount,
                      platform="", hold_quantity=None, profit_amount=0,
-                     record_date=None, notes=""):
+                     return_rate=None, record_date=None, notes=""):
     """
     新增一条资产记录。
 
@@ -237,6 +237,7 @@ def add_asset_record(product_code, product_name, asset_type, holding_amount,
         platform: 购买平台
         hold_quantity: 持仓数量（股数/份额），保险类为 None
         profit_amount: 持有收益（元）
+        return_rate: 持有收益率（小数，如 0.10 = 10%），可选
         record_date: 记录日期，默认今天
         notes: 备注
     """
@@ -246,12 +247,12 @@ def add_asset_record(product_code, product_name, asset_type, holding_amount,
     conn = _connect()
     try:
         conn.execute(
-            """INSERT INTO asset_records 
+            """INSERT INTO asset_records
                (product_code, product_name, type, platform, hold_quantity,
-                holding_amount, profit_amount, record_date, notes)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                holding_amount, profit_amount, return_rate, record_date, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (product_code, product_name, asset_type, platform, hold_quantity,
-             holding_amount, profit_amount, record_date, notes)
+             holding_amount, profit_amount, return_rate, record_date, notes)
         )
         conn.commit()
     finally:
@@ -415,68 +416,53 @@ def update_task_status(task_id, status, cron_job_name=None):
 
 
 # ═══════════════════════════════════════════════════════════════
-# 风险嗅探
+# 复盘日记
 # ═══════════════════════════════════════════════════════════════
 
-def get_sniff_configs(plan_id=None, active_only=True):
-    """
-    获取风险嗅探配置。
-
-    返回: list[dict]
-    """
+def create_review(plan_id, review_date, snapshot_prev, snapshot_curr,
+                  net_worth_change, net_worth_change_pct=0, drift_max=None,
+                  rebalance_needed=0, highlights="[]", concerns="[]",
+                  detail_json="{}", narrative=""):
+    """写入一篇复盘日记。返回 review_id。"""
     conn = _connect()
     try:
-        sql = "SELECT * FROM risk_sniff_config WHERE 1=1"
+        cur = conn.execute(
+            """INSERT INTO review_diaries
+               (plan_id, review_date, snapshot_prev, snapshot_curr,
+                net_worth_change, net_worth_change_pct, drift_max,
+                rebalance_needed, highlights, concerns, detail_json, narrative)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (plan_id, review_date, snapshot_prev, snapshot_curr,
+             net_worth_change, net_worth_change_pct, drift_max,
+             rebalance_needed, highlights, concerns, detail_json, narrative)
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_reviews(plan_id=None, limit=10):
+    """查询历史复盘记录，按日期倒序。返回 list[dict]。"""
+    conn = _connect()
+    try:
+        sql = "SELECT * FROM review_diaries WHERE 1=1"
         params = []
         if plan_id is not None:
             sql += " AND plan_id = ?"
             params.append(plan_id)
-        if active_only:
-            sql += " AND active = 1"
-        sql += " ORDER BY priority DESC"
-
+        sql += " ORDER BY review_date DESC LIMIT ?"
+        params.append(limit)
         rows = conn.execute(sql, params).fetchall()
-        result = []
-        for r in rows:
-            d = dict(r)
-            d["source_urls"] = json.loads(d["source_urls"])
-            result.append(d)
-        return result
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 
 
-def upsert_sniff_config(plan_id, keyword, source_urls, frequency="daily", priority="medium"):
-    """
-    写入或更新嗅探配置。同一 plan_id + keyword 去重。
-    """
-    conn = _connect()
-    try:
-        existing = conn.execute(
-            "SELECT id FROM risk_sniff_config WHERE plan_id = ? AND keyword = ?",
-            (plan_id, keyword)
-        ).fetchone()
-
-        now = _now()
-        urls_json = json.dumps(source_urls, ensure_ascii=False)
-
-        if existing:
-            conn.execute(
-                """UPDATE risk_sniff_config 
-                   SET source_urls=?, frequency=?, priority=?, active=1, updated_at=?
-                   WHERE plan_id=? AND keyword=?""",
-                (urls_json, frequency, priority, now, plan_id, keyword)
-            )
-        else:
-            conn.execute(
-                """INSERT INTO risk_sniff_config 
-                   (plan_id, keyword, source_urls, frequency, priority)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (plan_id, keyword, urls_json, frequency, priority)
-            )
-        conn.commit()
-    finally:
-        conn.close()
+def get_latest_review(plan_id=None):
+    """最近一次复盘。返回 dict 或 None。"""
+    reviews = get_reviews(plan_id=plan_id, limit=1)
+    return reviews[0] if reviews else None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -500,5 +486,5 @@ if __name__ == "__main__":
     print("\n=== Asset Records ===")
     print(get_asset_records())
 
-    print("\n=== Sniff Configs ===")
-    print(get_sniff_configs())
+    print("\n=== Latest Review ===")
+    print(get_latest_review())

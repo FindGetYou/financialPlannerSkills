@@ -13,6 +13,7 @@
   print(result["future_value"])  # 296048.57
 """
 
+import sys
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 
@@ -377,6 +378,15 @@ _TIER1_CITIES = {
     "兰州", "银川", "西宁", "海口", "拉萨", "福州",
 }
 
+# 极简投资 ETF 清单（源自 jane7.com "极简投资" 方法）
+_SIMPLE_INVEST_ETFS = {
+    "沪深300":    {"code": "510300", "type": "equity", "market": "A股"},
+    "中证500":    {"code": "510500", "type": "equity", "market": "A股"},
+    "标普500":    {"code": "513500", "type": "equity", "market": "美股"},
+    "纳斯达克100": {"code": "513100", "type": "equity", "market": "美股"},
+    "债券":        {"code": "511010", "type": "bond",   "market": "中国债市"},
+}
+
 
 def tax_bracket(annual_taxable_income: float):
     """
@@ -527,7 +537,133 @@ def income_tax(
 
 
 # ═══════════════════════════════════════════════════════════════
-# 5. 资产配置
+# 5. 投资收益反算
+# ═══════════════════════════════════════════════════════════════
+
+def investment_return(
+    holding_amount: float,
+    profit_amount: Optional[float] = None,
+    return_rate: Optional[float] = None,
+):
+    """
+    根据持仓市值、持有收益、收益率三者中的已知量推导未知量。
+
+    用户在 Excel 资产负债表填写"持有收益"和/或"收益率"列，
+    本函数完成互算和一致性校验。
+
+    Args:
+        holding_amount: 持仓市值（元），必填
+        profit_amount: 持有收益（元），可选。正=盈利，负=亏损
+        return_rate: 持有总收益率（小数，如 0.10 = 10%），可选
+
+    返回:
+        {
+            "holding_amount": 持仓市值（回显）,
+            "cost_basis":     持仓成本（元）,
+            "profit_amount":  持有收益（元）,
+            "return_rate":    持有总收益率（小数）,
+            "source":         "user_both" | "from_profit" | "from_rate" | "none",
+            "warning":        str | None,
+        }
+
+    公式（简单总收益率，非年化）:
+        已知收益、缺收益率: cost = amount - profit,  rate = profit / cost
+        已知收益率、缺收益: cost = amount / (1 + rate),  profit = amount - cost
+        两者都已知:        用给定值，验算一致性（差异 > 1% 时告警）
+    """
+    warning = None
+
+    # Case 1: 两者都未填
+    if profit_amount is None and return_rate is None:
+        return {
+            "holding_amount": holding_amount,
+            "cost_basis": _r(holding_amount),
+            "profit_amount": 0.0,
+            "return_rate": 0.0,
+            "source": "none",
+            "warning": None,
+        }
+
+    has_profit = profit_amount is not None
+    has_rate = return_rate is not None
+
+    # Case 2: 两者都填了 —— 使用给定值，校验一致性
+    if has_profit and has_rate:
+        cost_from_profit = holding_amount - profit_amount
+        rate_from_profit = profit_amount / cost_from_profit if cost_from_profit > 0 else 0.0
+
+        if abs(rate_from_profit - return_rate) > 0.01:
+            warning = (
+                f"填写的收益 {_fmt_cny(profit_amount)} 和收益率 {return_rate*100:.1f}% "
+                f"不一致（收益反算收益率 {rate_from_profit*100:.1f}%），已以填写的收益为准"
+            )
+
+        return {
+            "holding_amount": holding_amount,
+            "cost_basis": _r(holding_amount - profit_amount),
+            "profit_amount": _r(profit_amount),
+            "return_rate": round(return_rate, 4),
+            "source": "user_both",
+            "warning": warning,
+        }
+
+    # Case 3: 只填了持有收益 → 反算收益率
+    if has_profit and not has_rate:
+        cost = holding_amount - profit_amount
+        if cost <= 0:
+            return {
+                "holding_amount": holding_amount,
+                "cost_basis": _r(max(cost, 0.01)),
+                "profit_amount": _r(profit_amount),
+                "return_rate": 0.0,
+                "source": "from_profit",
+                "warning": f"持仓成本为零或负（金额 {_fmt_cny(holding_amount)}，收益 {_fmt_cny(profit_amount)}），无法计算收益率",
+            }
+        rate = profit_amount / cost
+        return {
+            "holding_amount": holding_amount,
+            "cost_basis": _r(cost),
+            "profit_amount": _r(profit_amount),
+            "return_rate": round(rate, 4),
+            "source": "from_profit",
+            "warning": None,
+        }
+
+    # Case 4: 只填了收益率 → 反算持有收益
+    if not has_profit and has_rate:
+        if return_rate <= -1:
+            return {
+                "holding_amount": holding_amount,
+                "cost_basis": _r(holding_amount),
+                "profit_amount": 0.0,
+                "return_rate": round(return_rate, 4),
+                "source": "from_rate",
+                "warning": f"收益率 {return_rate*100:.1f}% 异常（≤ -100%），无法反算收益",
+            }
+        cost = holding_amount / (1 + return_rate)
+        profit = holding_amount - cost
+        return {
+            "holding_amount": holding_amount,
+            "cost_basis": _r(cost),
+            "profit_amount": _r(profit),
+            "return_rate": round(return_rate, 4),
+            "source": "from_rate",
+            "warning": None,
+        }
+
+    # Fallback
+    return {
+        "holding_amount": holding_amount,
+        "cost_basis": _r(holding_amount),
+        "profit_amount": 0.0,
+        "return_rate": 0.0,
+        "source": "none",
+        "warning": None,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+# 6. 资产配置
 # ═══════════════════════════════════════════════════════════════
 
 def four_account_allocation(monthly_income: float):
@@ -750,49 +886,386 @@ def simple_portfolio(
     }
 
 
+def simple_invest_portfolio(monthly_amount: float, risk_tolerance: str = "medium"):
+    """
+    极简投资组合分配：5 只 ETF 等权重配置，源自 jane7.com"极简投资"方法。
+
+    核心原则：
+      - 4 只权益 ETF 等权重，不做市场择时
+      - 债券比例按风险偏好调整，权益之间始终等权
+      - 每年再平衡一次，卖涨买跌
+      - 适合 5 年以上长期持有
+    """
+    configs = {
+        "low":    {"bond_ratio": 0.50, "equity_each": 0.125},
+        "medium": {"bond_ratio": 0.20, "equity_each": 0.20},
+        "high":   {"bond_ratio": 0.10, "equity_each": 0.225},
+    }
+    cfg = configs.get(risk_tolerance, configs["medium"])
+
+    etfs = {}
+    for name, info in _SIMPLE_INVEST_ETFS.items():
+        ratio = cfg["bond_ratio"] if info["type"] == "bond" else cfg["equity_each"]
+        etf_monthly = monthly_amount * ratio
+        etfs[name] = {
+            "code": info["code"],
+            "ratio": ratio,
+            "monthly_amount": _r(etf_monthly),
+            "weekly_1x": _r(etf_monthly / 4.33),
+            "weekly_2x": _r(etf_monthly / 8.66),
+            "type": info["type"],
+            "market": info["market"],
+        }
+
+    equity_total = cfg["equity_each"] * 4
+    expected_return = equity_total * 0.08 + cfg["bond_ratio"] * 0.035
+
+    risk_reason = {
+        "low": f"你是保守型，债券比例提高到 {cfg['bond_ratio']*100:.0f}% 以降低波动，适合对亏损敏感的你。",
+        "medium": f"你是平衡型，采用极简投资经典配置：{cfg['bond_ratio']*100:.0f}% 债券 + {equity_total*100:.0f}% 权益，长期收益与风险的较优平衡。",
+        "high": f"你是进取型，权益比例提高到 {equity_total*100:.0f}% 追求更高收益，适合能接受较大波动的你。",
+    }
+
+    rationale = (
+        f"极简投资源自简七理财（jane7.com），是一个专为投资新手设计的懒人资产配置方法。\n\n"
+        f"核心理念：将资金分散到 5 只不相关的 ETF 中，不做市场择时，每年花 10 分钟再平衡一次。\n\n"
+        f"你的配置（{risk_tolerance_map(risk_tolerance)}）：\n"
+        f"  - 债券 ETF（511010）：{cfg['bond_ratio']*100:.0f}%\n"
+        f"  - 沪深300（510300）：{cfg['equity_each']*100:.1f}%\n"
+        f"  - 中证500（510500）：{cfg['equity_each']*100:.1f}%\n"
+        f"  - 标普500（513500）：{cfg['equity_each']*100:.1f}%\n"
+        f"  - 纳斯达克100（513100）：{cfg['equity_each']*100:.1f}%\n\n"
+        f"{risk_reason.get(risk_tolerance, risk_reason['medium'])}\n\n"
+        f"为什么推荐这个方法：\n"
+        f"  1. 简单透明——只有 5 只 ETF，没有复杂的选股或择时\n"
+        f"  2. 不赌单一市场——中美市场均衡配置，东方不亮西方亮\n"
+        f"  3. 省心省力——每年再平衡一次即可，平时不需要盯盘\n"
+        f"  4. 长期验证——过去 11 年累计收益约 164%，年化约 9%\n"
+        f"  5. 适合新手——你不需要是投资专家，只需要坚持定投 + 年度再平衡\n\n"
+        f"如果你有自己的投资偏好或想用的其他策略，可以随时调整——这只是默认推荐。"
+    )
+
+    summary = (
+        f"极简投资（{risk_tolerance_map(risk_tolerance)}）："
+        f"{cfg['bond_ratio']*100:.0f}% 债券ETF + "
+        f"{equity_total*100:.0f}% 权益ETF（4只各{cfg['equity_each']*100:.1f}%），"
+        f"每年再平衡，预期年化 {expected_return*100:.1f}%"
+    )
+
+    return {
+        "method": "极简投资",
+        "source": "jane7.com",
+        "monthly_amount": _r(monthly_amount),
+        "weekly_amounts": {
+            "1x_per_week": _r(monthly_amount / 4.33),
+            "2x_per_week": _r(monthly_amount / 8.66),
+        },
+        "bond_ratio": cfg["bond_ratio"],
+        "equity_ratio": equity_total,
+        "etfs": etfs,
+        "rebalance_frequency": "每年一次",
+        "expected_annual_return": round(expected_return, 4),
+        "rationale": rationale,
+        "summary": summary,
+    }
+
+
+def cashflow_health(monthly_income: float, monthly_expense: float, liquid_savings: float):
+    """
+    现金快照即时诊断：储蓄率 + 应急金覆盖 + 储蓄趋势。
+
+    这是用户接触财务规划师后的第一个「aha moment」——
+    只需 3 个数字，就能得到有意义的反馈。
+
+    Args:
+        monthly_income: 月收入（税后，元）
+        monthly_expense: 月支出（含房租/房贷，元）
+        liquid_savings: 可动用存款（现金/活期/货基，元）
+
+    返回:
+        {
+            "monthly_savings": 月储蓄额,
+            "savings_rate": 储蓄率（0-1）,
+            "savings_rating": "优秀" | "良好" | "一般" | "偏低",
+            "emergency_coverage_months": 应急金覆盖月数,
+            "emergency_rating": "充足" | "警戒" | "不足",
+            "annual_projection": {1年/3年/5年 终值},
+            "suggestions": [建议列表],
+            "summary": 一句话总结,
+        }
+    """
+    monthly_savings = monthly_income - monthly_expense
+
+    # ── 储蓄率诊断 ──
+    savings_rate = monthly_savings / monthly_income if monthly_income > 0 else 0
+
+    if savings_rate >= 0.30:
+        savings_rating = "优秀"
+        rate_note = f"月储蓄率 {savings_rate*100:.0f}%，远超健康线（20%），继续保持"
+    elif savings_rate >= 0.15:
+        savings_rating = "良好"
+        rate_note = f"月储蓄率 {savings_rate*100:.0f}%，在健康范围内"
+    elif savings_rate >= 0.05:
+        savings_rating = "一般"
+        rate_note = f"月储蓄率 {savings_rate*100:.0f}%，偏低，建议提高到 15% 以上"
+    else:
+        savings_rating = "偏低"
+        rate_note = f"月储蓄率仅 {savings_rate*100:.0f}%，基本月光，需要审视支出结构"
+
+    # ── 应急金诊断 ──
+    emergency_months = liquid_savings / monthly_expense if monthly_expense > 0 else float("inf")
+
+    if emergency_months >= 6:
+        emergency_rating = "充足"
+        emergency_note = f"应急金覆盖 {emergency_months:.0f} 个月，充足"
+    elif emergency_months >= 3:
+        emergency_rating = "警戒"
+        emergency_note = f"应急金覆盖 {emergency_months:.0f} 个月，建议补到 6 个月"
+    else:
+        emergency_rating = "不足"
+        emergency_note = f"应急金仅覆盖 {emergency_months:.0f} 个月，建议优先补足"
+
+    # ── 储蓄趋势推算 ──
+    annual_savings = monthly_savings * 12
+    projections = {}
+    for years, rate in [(1, 0.02), (3, 0.03), (5, 0.04)]:
+        result = fv(pv=liquid_savings, rate=rate, years=years, pmt=annual_savings)
+        projections[f"{years}年"] = {
+            "total": _r(result["future_value"]),
+            "principal": _r(result["total_principal"]),
+            "return": _r(result["total_return"]),
+        }
+
+    # ── 建议生成 ──
+    suggestions = []
+    if emergency_rating == "不足":
+        gap = monthly_expense * 6 - liquid_savings
+        if gap > 0:
+            months_to_fill = gap / monthly_savings if monthly_savings > 0 else float("inf")
+            if months_to_fill != float("inf") and months_to_fill <= 24:
+                suggestions.append(f"优先补应急金：缺口 {_fmt_cny(gap)}，按当前储蓄速度约 {months_to_fill:.0f} 个月可补足")
+            else:
+                suggestions.append(f"应急金缺口 {_fmt_cny(gap)}，建议优先储备")
+    if savings_rating in ("一般", "偏低"):
+        suggestions.append("建议梳理月度支出，找出可压缩的非必要消费")
+    if savings_rate >= 0.15:
+        suggestions.append("储蓄率健康，可以考虑开始定投指数基金")
+
+    # ── 一句话总结 ──
+    if emergency_rating == "不足":
+        summary_hook = f"你的月储蓄率 {savings_rate*100:.0f}%，但应急金仅够 {emergency_months:.0f} 个月——建议优先补足安全垫，再考虑投资。"
+    elif savings_rating in ("一般", "偏低"):
+        summary_hook = f"月储蓄率 {savings_rate*100:.0f}%，应急金覆盖 {emergency_months:.0f} 个月。先提高储蓄率是当下最重要的事。"
+    else:
+        summary_hook = (
+            f"财务状况健康：月储蓄率 {savings_rate*100:.0f}%，"
+            f"应急金覆盖 {emergency_months:.0f} 个月。"
+            f"按当前速度，5 年后预计积累 {_fmt_cny(projections['5年']['total'])}。"
+        )
+
+    return {
+        "monthly_income": monthly_income,
+        "monthly_expense": monthly_expense,
+        "monthly_savings": _r(monthly_savings),
+        "savings_rate": round(savings_rate, 4),
+        "savings_rating": savings_rating,
+        "rate_note": rate_note,
+        "liquid_savings": liquid_savings,
+        "emergency_coverage_months": round(emergency_months, 1),
+        "emergency_rating": emergency_rating,
+        "emergency_note": emergency_note,
+        "annual_projection": projections,
+        "suggestions": suggestions,
+        "summary": summary_hook,
+    }
+
+
 def risk_tolerance_map(level: str) -> str:
     mapping = {"low": "保守型", "medium": "平衡型", "high": "进取型"}
     return mapping.get(level, "平衡型")
 
 
 # ═══════════════════════════════════════════════════════════════
-# 自检
+# CLI
 # ═══════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("=== 复利：终值 ===")
-    print(fv(pv=200000, rate=0.04, years=10))
+    import argparse
+    import json
 
-    print("\n=== 复利：现值 ===")
-    print(pv(fv=500000, rate=0.04, years=15))
+    parser = argparse.ArgumentParser(
+        description="财务规划计算器 CLI — 所有计算函数均可通过子命令调用，输出 JSON",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
 
-    print("\n=== 复利：定投 ===")
-    print(pmt(target=1000000, rate=0.05, years=20))
+    # 1. fv — 终值计算
+    p = sub.add_parser("fv", help="终值计算：pv → fv")
+    p.add_argument("--pv", type=float, required=True, help="现值（元）")
+    p.add_argument("--rate", type=float, required=True, help="年化收益率（如 0.04）")
+    p.add_argument("--years", type=int, required=True, help="投资年限")
+    p.add_argument("--pmt", type=float, default=0, help="每年追加投入（元）")
 
-    print("\n=== 退休缺口 ===")
-    print(retirement_gap(30, 60, 85, 500000, 10000))
+    # 2. pv — 现值计算
+    p = sub.add_parser("pv", help="现值计算：fv → pv")
+    p.add_argument("--fv", type=float, required=True, help="目标终值（元）")
+    p.add_argument("--rate", type=float, required=True, help="年化收益率")
+    p.add_argument("--years", type=int, required=True, help="投资年限")
 
-    print("\n=== 保险保额 ===")
-    print(insurance_coverage(annual_income=200000, dependents=2, debt=800000))
+    # 3. pmt — 定投计算
+    p = sub.add_parser("pmt", help="定投计算：目标 → 每年投入")
+    p.add_argument("--target", type=float, required=True, help="目标金额（元）")
+    p.add_argument("--rate", type=float, required=True, help="年化收益率")
+    p.add_argument("--years", type=int, required=True, help="投资年限")
 
-    print("\n=== 个税计算 ===")
-    print(income_tax(annual_income=300000, city="北京", deductions={"children": 1, "housing_rent": True}))
+    # 4. retirement-corpus — 退休本金
+    p = sub.add_parser("retirement-corpus", help="退休时所需本金")
+    p.add_argument("--desired-monthly", type=float, required=True, help="期望月支出（元）")
+    p.add_argument("--retire-age", type=int, required=True, help="退休年龄")
+    p.add_argument("--life-expectancy", type=int, required=True, help="预期寿命")
+    p.add_argument("--inflation", type=float, default=0.03, help="通胀率（默认 0.03）")
+    p.add_argument("--return-rate", type=float, default=0.04, help="退休后收益率（默认 0.04）")
 
-    print("\n=== 税率档位 ===")
-    print(tax_bracket(150000))
+    # 5. retirement-gap — 退休缺口
+    p = sub.add_parser("retirement-gap", help="退休缺口分析")
+    p.add_argument("--current-age", type=int, required=True, help="当前年龄")
+    p.add_argument("--retire-age", type=int, required=True, help="退休年龄")
+    p.add_argument("--life-expectancy", type=int, required=True, help="预期寿命")
+    p.add_argument("--current-savings", type=float, required=True, help="当前储蓄（元）")
+    p.add_argument("--desired-monthly", type=float, required=True, help="期望月支出（元）")
+    p.add_argument("--inflation", type=float, default=0.03, help="通胀率")
+    p.add_argument("--return-rate", type=float, default=0.05, help="退休前收益率")
 
-    print("\n=== 四账户配置 ===")
-    print(four_account_allocation(monthly_income=20000))
+    # 6. insurance — 保额估算
+    p = sub.add_parser("insurance", help="寿险/意外险保额估算")
+    p.add_argument("--annual-income", type=float, required=True, help="年收入（元）")
+    p.add_argument("--dependents", type=int, default=0, help="抚养人数")
+    p.add_argument("--debt", type=float, default=0, help="负债（元）")
+    p.add_argument("--existing-coverage", type=float, default=0, help="已有保额（元）")
 
-    print("\n=== 偏离度分析 ===")
-    print(allocation_drift(
-        current_alloc={
-            "股票": {"ratio": 0.55, "amount": 275000},
-            "债券": {"ratio": 0.30, "amount": 150000},
-            "现金": {"ratio": 0.15, "amount": 75000},
-        },
-        target_alloc={"股票": 0.40, "债券": 0.40, "现金": 0.20},
-    ))
+    # 7. tax-bracket — 税率档位
+    p = sub.add_parser("tax-bracket", help="查询个税税率档位")
+    p.add_argument("--income", type=float, required=True, help="年度应税收入（元）")
 
-    print("\n=== 精简仓位规划 ===")
-    print(simple_portfolio(amount=500000, goal_return=0.06, timeline=10, risk_tolerance="medium"))
+    # 8. income-tax — 个税计算
+    p = sub.add_parser("income-tax", help="年度个人所得税计算")
+    p.add_argument("--annual-income", type=float, required=True, help="年度总收入（元）")
+    p.add_argument("--city", default="北京", help="所在城市（默认 北京）")
+    p.add_argument("--deductions", default=None, help="专项附加扣除 JSON（如 '{\"children\":1,\"housing_rent\":true}'）")
+
+    # 9. investment-return — 投资收益互算
+    p = sub.add_parser("investment-return", help="持仓收益/收益率互算")
+    p.add_argument("--holding-amount", type=float, required=True, help="持仓市值（元）")
+    p.add_argument("--profit-amount", type=float, default=None, help="持有收益（元），可选")
+    p.add_argument("--return-rate", type=float, default=None, help="收益率（小数，可选）")
+
+    # 10. four-account — 四账户配置
+    p = sub.add_parser("four-account", help="四账户模型分配")
+    p.add_argument("--monthly-income", type=float, required=True, help="月收入（元）")
+
+    # 11. allocation-drift — 偏离度分析（JSON 输入）
+    p = sub.add_parser("allocation-drift", help="资产配置偏离度分析")
+    p.add_argument("--current", required=True, help="当前持仓 JSON（含 ratio 和 amount）")
+    p.add_argument("--target", required=True, help="目标配置 JSON（仅 ratio）")
+
+    # 12. simple-portfolio — 精简仓位规划
+    p = sub.add_parser("simple-portfolio", help="精简仓位规划")
+    p.add_argument("--amount", type=float, required=True, help="投资金额（元）")
+    p.add_argument("--goal-return", type=float, required=True, help="目标年化收益（如 0.06）")
+    p.add_argument("--timeline", type=int, required=True, help="投资期限（年）")
+    p.add_argument("--risk-tolerance", default="medium", choices=["low", "medium", "high"], help="风险偏好")
+
+    # 13. cashflow-health — 现金流健康诊断
+    p = sub.add_parser("cashflow-health", help="现金流健康诊断")
+    p.add_argument("--monthly-income", type=float, required=True, help="月收入（元）")
+    p.add_argument("--monthly-expense", type=float, required=True, help="月支出（元）")
+    p.add_argument("--liquid-savings", type=float, required=True, help="可动用存款（元）")
+
+    # 14. simple-invest — 极简投资组合
+    p = sub.add_parser("simple-invest", help="极简投资5 ETF组合")
+    p.add_argument("--monthly-amount", type=float, required=True, help="每月定投金额（元）")
+    p.add_argument("--risk-tolerance", default="medium", choices=["low", "medium", "high"], help="风险偏好")
+
+    args = parser.parse_args()
+    cmd = args.command
+
+    try:
+        if cmd == "fv":
+            result = fv(pv=args.pv, rate=args.rate, years=args.years, pmt=args.pmt)
+        elif cmd == "pv":
+            result = pv(fv=args.fv, rate=args.rate, years=args.years)
+        elif cmd == "pmt":
+            result = pmt(target=args.target, rate=args.rate, years=args.years)
+        elif cmd == "retirement-corpus":
+            result = retirement_corpus_needed(
+                desired_monthly=args.desired_monthly,
+                retire_age=args.retire_age,
+                life_expectancy=args.life_expectancy,
+                inflation=args.inflation,
+                return_rate=args.return_rate,
+            )
+        elif cmd == "retirement-gap":
+            result = retirement_gap(
+                current_age=args.current_age,
+                retire_age=args.retire_age,
+                life_expectancy=args.life_expectancy,
+                current_savings=args.current_savings,
+                desired_monthly=args.desired_monthly,
+                inflation=args.inflation,
+                return_rate=args.return_rate,
+            )
+        elif cmd == "insurance":
+            result = insurance_coverage(
+                annual_income=args.annual_income,
+                dependents=args.dependents,
+                debt=args.debt,
+                existing_coverage=args.existing_coverage,
+            )
+        elif cmd == "tax-bracket":
+            result = tax_bracket(annual_taxable_income=args.income)
+        elif cmd == "income-tax":
+            deductions = None
+            if args.deductions:
+                deductions = json.loads(args.deductions)
+            result = income_tax(
+                annual_income=args.annual_income,
+                city=args.city,
+                deductions=deductions,
+            )
+        elif cmd == "investment-return":
+            result = investment_return(
+                holding_amount=args.holding_amount,
+                profit_amount=args.profit_amount,
+                return_rate=args.return_rate,
+            )
+        elif cmd == "four-account":
+            result = four_account_allocation(monthly_income=args.monthly_income)
+        elif cmd == "allocation-drift":
+            current = json.loads(args.current)
+            target = json.loads(args.target)
+            result = allocation_drift(current_alloc=current, target_alloc=target)
+        elif cmd == "simple-portfolio":
+            result = simple_portfolio(
+                amount=args.amount,
+                goal_return=args.goal_return,
+                timeline=args.timeline,
+                risk_tolerance=args.risk_tolerance,
+            )
+        elif cmd == "cashflow-health":
+            result = cashflow_health(
+                monthly_income=args.monthly_income,
+                monthly_expense=args.monthly_expense,
+                liquid_savings=args.liquid_savings,
+            )
+        elif cmd == "simple-invest":
+            result = simple_invest_portfolio(
+                monthly_amount=args.monthly_amount,
+                risk_tolerance=args.risk_tolerance,
+            )
+        else:
+            result = {"error": f"未知命令: {cmd}"}
+
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+
+    except Exception as e:
+        print(json.dumps({"error": str(e)}, ensure_ascii=False))
+        sys.exit(1)

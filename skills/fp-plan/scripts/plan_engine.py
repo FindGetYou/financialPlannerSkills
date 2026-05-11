@@ -12,22 +12,18 @@
 import sys
 import os
 
-# 确保能导入 calc（从项目 scripts/ 或 ~/.financial-planner/scripts/）
-_calc_paths = [
-    os.path.join(os.path.dirname(__file__), "..", "..", "fp-calculator", "scripts"),
-    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "skills", "fp-calculator", "scripts"),
-    os.path.expanduser("~/.financial-planner/scripts"),
-    os.path.join(os.path.dirname(__file__), "..", "..", "..", "scripts"),
-]
-for _p in _calc_paths:
-    _p = os.path.abspath(_p)
-    if _p not in sys.path and os.path.isdir(_p):
-        sys.path.insert(0, _p)
+_exec_dir = os.path.dirname(os.path.abspath(__file__))
+_scripts_dir = os.path.abspath(os.path.join(_exec_dir, "..", "..", "..", "scripts"))
+if _scripts_dir not in sys.path and os.path.isdir(_scripts_dir):
+    sys.path.insert(0, _scripts_dir)
+from _path_setup import init
+init()
 
 from calc import (
     fv, pv, pmt,
     retirement_gap, retirement_corpus_needed,
     four_account_allocation, allocation_drift, simple_portfolio,
+    simple_invest_portfolio,
     _r, _fmt_cny,
 )
 
@@ -108,11 +104,29 @@ def recommend_model(profile: dict):
         }
 
 
+def _get_monthly_income(fields):
+    """获取月收入，自动识别画像中的 income 是月收入还是年收入"""
+    inc = _parse_range_mid(fields.get("income", ""))
+    if inc <= 0:
+        return 10000
+    # 如果小于 10 万，视为月收入；否则视为年收入需要除以 12
+    return inc if inc < 100000 else inc / 12
+
+
+def _get_annual_income(fields):
+    """获取年收入"""
+    monthly = _get_monthly_income(fields)
+    return monthly * 12
+
+
 def _is_significant_assets(net_worth_str, income_str):
     """判断是否有显著积蓄：净资产 > 年收入 × 2"""
     try:
         nw = _parse_range_mid(net_worth_str)
         inc = _parse_range_mid(income_str)
+        # 如果 income 可能为月收入（< 10万），则换算为年收入
+        if inc < 100000:
+            inc = inc * 12
         return nw > inc * 2 if inc > 0 else nw > 100000
     except (ValueError, TypeError):
         return False
@@ -122,16 +136,23 @@ def _parse_range_mid(s):
     """解析区间/数值字符串，返回中间值。如 '10-20万' → 150000"""
     if not s:
         return 0
+    # 已经是数值类型，直接返回
+    if isinstance(s, (int, float)):
+        return float(s)
+    s = str(s)
+    has_wan = "万" in s
     s = s.replace("万", "").replace("约", "").replace("以内", "").replace("左右", "").strip()
     try:
-        return float(s) * 10000
+        val = float(s)
+        return val * 10000 if has_wan else val
     except ValueError:
         if "-" in s or "~" in s:
             parts = re.split(r"[-~]", s)
             try:
-                lo = float(parts[0]) * 10000
-                hi = float(parts[1]) * 10000
-                return (lo + hi) / 2
+                lo = float(parts[0])
+                hi = float(parts[1])
+                mid = (lo + hi) / 2
+                return mid * 10000 if has_wan else mid
             except (ValueError, IndexError):
                 return 0
         return 0
@@ -173,6 +194,15 @@ def generate_plan(profile: dict, model: str):
         return {"error": f"未知模型: {model}"}
 
 
+def _format_simple_invest_weekly(simple_inv):
+    """格式化极简投资周定投说明，生成简洁的 ETF 列表字符串"""
+    parts = []
+    for name, info in simple_inv["etfs"].items():
+        if info["weekly_1x"] > 0:
+            parts.append(f"{name}({info['code']}) ¥{info['weekly_1x']:.0f}/周")
+    return "  ".join(parts)
+
+
 def _profile_summary(fields):
     """从画像字段生成人类可读的摘要"""
     age = fields.get("age", "未知")
@@ -197,14 +227,21 @@ def _profile_summary(fields):
 
 def _gen_four_account(fields):
     """生成四账户方案"""
-    # 估算月收入
-    income_str = fields.get("income", "")
-    monthly = _parse_range_mid(income_str) / 12
+    monthly = _get_monthly_income(fields)
+    monthly_expense = _parse_range_mid(fields.get("expense", ""))
+    if monthly_expense <= 0:
+        monthly_expense = 0
+    # 按可支配收入（收入减支出）分配，确保方案可行
+    disposable = max(monthly - monthly_expense, 0)
+    if disposable < 1000:
+        disposable = monthly * 0.3  # 兜底：至少按收入的 30%
 
-    if monthly <= 0:
-        monthly = 10000  # 默认 1 万/月作为兜底
+    alloc = four_account_allocation(disposable)
 
-    alloc = four_account_allocation(monthly)
+    # 极简投资：为金鹅池（高收益账户）生成具体 ETF 配置
+    risk = fields.get("risk_tolerance", "medium")
+    growth_monthly = alloc["accounts"]["growth"]["monthly"]
+    simple_inv = simple_invest_portfolio(growth_monthly, risk)
 
     ps = _profile_summary(fields)
 
@@ -214,30 +251,52 @@ def _gen_four_account(fields):
         "profile_summary": ps,
         "assumptions": {
             "monthly_income": monthly,
-            "explanation": "基于你提供的收入信息估算的月收入，如有偏差可调整",
+            "monthly_expense": monthly_expense,
+            "disposable_income": disposable,
+            "explanation": f"月收入 {_fmt_cny(monthly)}，扣除支出 {_fmt_cny(monthly_expense)}，可支配 {_fmt_cny(disposable)} 用于四账户分配",
         },
-        "allocations": alloc["accounts"],
-        "overview": alloc["summary"],
-        "suggestions": _four_account_suggestions(fields, alloc),
+        "allocations": {
+            **alloc["accounts"],
+            "growth": {
+                **alloc["accounts"]["growth"],
+                "note": f"高收益（极简投资）：{simple_inv['summary']}",
+                "simple_invest": simple_inv,
+            },
+        },
+        "overview": f"月可支配 {_fmt_cny(disposable)}（收入 {_fmt_cny(monthly)} - 支出 {_fmt_cny(monthly_expense)}）按四账户分配："
+                   f"应急 {_fmt_cny(alloc['accounts']['emergency']['monthly'])}/月 + "
+                   f"保障 {_fmt_cny(alloc['accounts']['insurance']['monthly'])}/月 + "
+                   f"保本增值 {_fmt_cny(alloc['accounts']['stable']['monthly'])}/月 + "
+                   f"高收益（极简投资） {_fmt_cny(alloc['accounts']['growth']['monthly'])}/月",
+        "simple_invest_rationale": simple_inv["rationale"],
+        "suggestions": _four_account_suggestions(fields, alloc, monthly_expense, simple_inv),
         "tasks_preview": [
-            {"priority": "紧急", "desc": f"开立应急账户，存入 ¥{_r(monthly*6):,.0f}（3-6 个月生活费）"},
+            {"priority": "紧急", "desc": f"开立应急账户，存入 ¥{_r(monthly_expense*6):,.0f}（6 个月生活费）"},
             {"priority": "高", "desc": "配置基础保障：重疾险 + 医疗险 + 意外险"},
-            {"priority": "中", "desc": f"建立每月定投计划：指数基金 ¥{alloc['accounts']['growth']['monthly']:,.0f}/月"},
+            {"priority": "中", "desc": f"每周定投极简投资组合（5 ETF），任选一天操作：{_format_simple_invest_weekly(simple_inv)}"},
             {"priority": "中", "desc": f"每月向保本账户存入 ¥{alloc['accounts']['stable']['monthly']:,.0f}，配置债券基金"},
-            {"priority": "低", "desc": "每季度检查一次四账户比例，偏离超 5% 时再平衡"},
+            {"priority": "低", "desc": "每年做一次极简投资组合再平衡，恢复各 ETF 到目标权重"},
         ],
     }
 
     return plan
 
 
-def _four_account_suggestions(fields, alloc):
+def _four_account_suggestions(fields, alloc, monthly_expense=0, simple_inv=None):
     """四账户补充建议"""
     suggestions = []
 
-    # 应急账户建议
+    if simple_inv:
+        suggestions.append(
+            "金鹅池（高收益账户）默认采用「极简投资」方法（源自 jane7.com）："
+            f"{simple_inv['summary']}。这个方法简单透明、不择时、适合投资新手——"
+            "你不需要判断涨跌，只需要坚持定投 + 每年再平衡。如果你有偏好的投资策略，可以随时调整。"
+        )
+
+    # 应急账户建议（按月支出计算）
+    em_target = monthly_expense * 6 if monthly_expense > 0 else 60000
     suggestions.append(
-        f"应急账户建议存够 ¥{_r(fields.get('monthly_income', 10000) if isinstance(fields.get('monthly_income'), (int, float)) else 10000) * 6:,.0f}（6个月支出），"
+        f"应急账户建议存够 {_fmt_cny(em_target)}（6 个月支出），"
         "放货币基金或活期理财，随用随取"
     )
 
@@ -274,6 +333,12 @@ def _gen_core_satellite(fields):
     core_amount = total * cfg["core"]
     sat_amount = total * cfg["satellite"]
 
+    # 极简投资参考：为core仓权益部分提供具体ETF代码
+    risk = fields.get("risk_tolerance", "medium")
+    core_equity_ratio = cfg.get("core_equity", 0.60)  # core中权益占比
+    core_equity_monthly = (core_amount * core_equity_ratio) / 12  # 折算月投入用于展示ETF方案
+    simple_inv = simple_invest_portfolio(max(core_equity_monthly, 1000), risk)
+
     # 模拟当前持仓（空）vs 目标配置的偏离度
     current = {
         "核心仓": {"ratio": 0, "amount": 0},
@@ -298,6 +363,8 @@ def _gen_core_satellite(fields):
                 "amount": _r(core_amount),
                 "description": cfg["core_desc"],
                 "assets": cfg["core_desc"].split(" + "),
+                "simple_invest_note": f"权益部分建议参考极简投资等权思路：沪深300+中证500+标普500+纳斯达克100各{simple_inv['etfs']['沪深300']['ratio']*100:.0f}%，债券{simple_inv['bond_ratio']*100:.0f}%",
+                "simple_invest_etfs": simple_inv["etfs"],
             },
             "satellite": {
                 "ratio": cfg["satellite"],
@@ -323,6 +390,10 @@ def _gen_core_satellite(fields):
 def _core_satellite_suggestions(fields, cfg):
     suggestions = []
     suggestions.append(f"核心仓（{cfg['core']*100:.0f}%）追求稳定，卫星仓（{cfg['satellite']*100:.0f}%）追求超额收益")
+    suggestions.append(
+        "核心仓的权益部分可以参考「极简投资」方法（源自 jane7.com）："
+        "沪深300+中证500+标普500+纳斯达克100等权重配置，不做市场择时。详见方案配置中的 ETF 代码参考。"
+    )
 
     goal = fields.get("goal_financial", "")
     timeline = fields.get("goal_timeline", "")
@@ -334,9 +405,7 @@ def _core_satellite_suggestions(fields, cfg):
 
 def _gen_goal_oriented(fields):
     """生成目标导向方案"""
-    monthly_income = _parse_range_mid(fields.get("income", "")) / 12
-    if monthly_income <= 0:
-        monthly_income = 15000
+    monthly_income = _get_monthly_income(fields)
 
     goal = fields.get("goal_financial", "财务自由")
     timeline_str = fields.get("goal_timeline", "10年")
@@ -347,6 +416,8 @@ def _gen_goal_oriented(fields):
     years = int(timeline_match.group(1)) if timeline_match else 10
 
     # 根据目标类型判断策略
+    simple_inv = None
+    goal_monthly_growth = 0
     goal_lower = goal.lower()
     if any(kw in goal_lower for kw in ["买房", "首付", "购房"]):
         goal_type = "买房"
@@ -369,6 +440,14 @@ def _gen_goal_oriented(fields):
         strategy = "平衡策略：债券+股票 50/50，兼顾增长和风险控制"
         alloc_desc = {"stock": 0.50, "bond": 0.50}
         monthly_alloc = monthly_income * 0.30
+
+    # 极简投资增强：长期目标（退休/被动收入/通用）添加具体ETF方案
+    # 买房是短期低风险目标，不适合80%权益的极简投资
+    simple_inv = None
+    if goal_type != "买房":
+        growth_portion = 0.70  # 目标账户中70%用于长期增长
+        goal_monthly_growth = monthly_alloc * growth_portion
+        simple_inv = simple_invest_portfolio(max(goal_monthly_growth, 1000), risk)
 
     # 计算目标金额（简单估算）
     if goal_type == "买房":
@@ -405,6 +484,12 @@ def _gen_goal_oriented(fields):
                 "allocation": alloc_desc,
                 "estimated_target": _r(target_amount),
                 "note": strategy,
+                **({"simple_invest_growth_pool": {
+                    "monthly_amount": _r(goal_monthly_growth),
+                    "etfs": simple_inv["etfs"],
+                    "summary": simple_inv["summary"],
+                    "rationale": simple_inv["rationale"],
+                }} if simple_inv else {}),
             },
             {
                 "name": "「日常」子账户",
@@ -421,8 +506,8 @@ def _gen_goal_oriented(fields):
     # 简化分配描述
     alloc_desc_str = ", ".join(f"{k}:{v*100:.0f}%" for k, v in alloc_desc.items())
     plan["tasks_preview"] = [
-        {"priority": "高", "desc": f"开设「{goal_type}」专属子账户，开始每月定投 ¥{monthly_alloc:,.0f}"},
-        {"priority": "中", "desc": f"配置 {alloc_desc_str}"},
+        {"priority": "高", "desc": f"开设「{goal_type}」专属子账户，开始每周定投极简投资5 ETF组合"},
+        {"priority": "中", "desc": f"配置 {alloc_desc_str}" + (f"（增长部分：{simple_inv['summary']}）" if simple_inv else "")},
         {"priority": "低", "desc": f"随目标临近（还剩 {max(years-2, 1)} 年时）逐步降低权益比例"},
     ]
     return plan
@@ -430,9 +515,14 @@ def _gen_goal_oriented(fields):
 
 def _goal_suggestions(goal_type, years, monthly_alloc, risk):
     suggestions = []
-    suggestions.append(f"建议每月固定存入 ¥{monthly_alloc:,.0f} 到目标子账户，坚持 {years} 年")
+    suggestions.append(f"建议每周定投 ¥{monthly_alloc/4.33:,.0f} 到目标子账户，坚持 {years} 年")
     if risk == "low" and goal_type != "买房":
         suggestions.append("你是保守型，建议目标子账户以债券为主，降低波动")
+    if goal_type != "买房":
+        suggestions.append(
+            "长期增长部分默认采用「极简投资」方法（源自 jane7.com）："
+            "5只ETF等权重配置，每年再平衡。这个方法适合5年以上的长期目标，简单且经过时间验证。"
+        )
     suggestions.append(f"建议每年底复盘一次目标进度，根据实际情况调整月存金额")
     return suggestions
 

@@ -42,12 +42,25 @@ def init_db():
     try:
         conn.executescript(schema_sql)
         conn.commit()
+
+        # 幂等迁移：为已有数据库添加 return_rate 列
+        _migrate(conn)
+
         print(f"[OK] 数据库初始化完成: {DB_PATH}")
     except Exception as e:
         print(f"[ERROR] 初始化失败: {e}", file=sys.stderr)
         raise
     finally:
         conn.close()
+
+
+def _migrate(conn):
+    """幂等迁移：检查并添加缺失的列"""
+    try:
+        conn.execute("ALTER TABLE asset_records ADD COLUMN return_rate REAL")
+        print("[OK] 迁移: asset_records 添加 return_rate 列")
+    except Exception:
+        pass  # 列已存在
 
 
 def reset_db():

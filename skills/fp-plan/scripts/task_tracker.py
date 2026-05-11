@@ -12,15 +12,15 @@
 import sys
 import os
 
-_script_dir = os.path.dirname(os.path.abspath(__file__))
-_user_scripts = os.path.expanduser("~/.financial-planner/scripts")
-_project_scripts = os.path.join(_script_dir, "..", "..", "..", "scripts")
-for _p in [_project_scripts, _user_scripts]:
-    _p = os.path.abspath(_p)
-    if _p not in sys.path and os.path.isdir(_p):
-        sys.path.insert(0, _p)
+_exec_dir = os.path.dirname(os.path.abspath(__file__))
+_scripts_dir = os.path.abspath(os.path.join(_exec_dir, "..", "..", "..", "scripts"))
+if _scripts_dir not in sys.path and os.path.isdir(_scripts_dir):
+    sys.path.insert(0, _scripts_dir)
+from _path_setup import init
+init()
 
 import db_query
+from calc import simple_invest_portfolio, _r
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -83,17 +83,31 @@ def _tasks_four_account(plan, profile):
             "category": "setup",
         },
         {
-            "task_desc": f"建立月度定投计划：指数基金 ¥{alloc.get('growth', {}).get('monthly', 5000):,.0f}/月 + 债券基金 ¥{alloc.get('stable', {}).get('monthly', 8000):,.0f}/月",
+            "task_desc": _format_weekly_dca(plan, profile),
             "priority": 2,
-            "deadline": None,  # 持续性任务
-            "depends_on": 0,  # 依赖应急账户开立
+            "deadline": None,
+            "depends_on": 0,
             "category": "regular",
         },
         {
-            "task_desc": "每季度检查四账户比例，偏离超过 5% 时执行再平衡",
+            "task_desc": f"每月向保本账户存入 ¥{alloc.get('stable', {}).get('monthly', 8000):,.0f}，配置债券基金",
+            "priority": 2,
+            "deadline": None,
+            "depends_on": 0,
+            "category": "regular",
+        },
+        {
+            "task_desc": "每年做一次极简投资组合再平衡：检查 5 只 ETF 比例，偏离超 5% 时卖出超配买入低配，恢复目标权重",
             "priority": 3,
-            "deadline": None,  # 定期任务
-            "depends_on": 2,
+            "deadline": None,
+            "depends_on": 1,
+            "category": "review",
+        },
+        {
+            "task_desc": "每季度检查四账户总比例（应急/保障/保本增值/高收益），偏离超 5% 时调整月分配额",
+            "priority": 3,
+            "deadline": None,
+            "depends_on": 1,
             "category": "review",
         },
     ]
@@ -128,7 +142,7 @@ def _tasks_core_satellite(plan, profile):
             "category": "setup",
         },
         {
-            "task_desc": "制定再平衡规则：每季度检查，核心/卫星偏离超 5% 时执行再平衡",
+            "task_desc": "制定再平衡规则：每季度检查核心/卫星偏离超 5% 时执行再平衡。核心仓权益部分（极简投资 ETF）每年做一次等权再平衡",
             "priority": 3,
             "deadline": None,
             "depends_on": 1,
@@ -149,9 +163,13 @@ def _tasks_goal_oriented(plan, profile):
     goal_type = plan.get("goal", {}).get("type", "目标")
     years = plan.get("goal", {}).get("timeline_years", 5)
 
+    has_simple_inv = "simple_invest_growth_pool" in sub
+
     tasks = [
         {
-            "task_desc": f"开设「{goal_type}」专属子账户，启动每月定投 ¥{monthly:,.0f}",
+            "task_desc": f"开设「{goal_type}」专属子账户，启动每周定投极简投资5 ETF组合"
+                         if has_simple_inv else
+                         f"开设「{goal_type}」专属子账户，启动每月定投 ¥{monthly:,.0f}",
             "priority": 1,
             "deadline": (today + timedelta(days=14)).strftime("%Y-%m-%d"),
             "depends_on": None,
@@ -165,7 +183,8 @@ def _tasks_goal_oriented(plan, profile):
             "category": "setup",
         },
         {
-            "task_desc": f"坚持每月定投 ¥{monthly:,.0f}，保持自律",
+            "task_desc": _format_weekly_dca(plan, profile) if has_simple_inv else
+                         f"坚持每月定投 ¥{monthly:,.0f}，保持自律",
             "priority": 2,
             "deadline": None,
             "depends_on": 1,
@@ -179,7 +198,7 @@ def _tasks_goal_oriented(plan, profile):
             "category": "review",
         },
         {
-            "task_desc": f"距目标剩余 2 年时（约 {years - 2} 年后），逐步降低子账户权益比例，转向低风险配置",
+            "task_desc": f"距目标剩余 2 年时（约 {years - 2} 年后），逐步降低{'极简投资组合中' if has_simple_inv else ''}权益比例，转向低风险配置",
             "priority": 3,
             "deadline": None,
             "depends_on": 2,
@@ -199,6 +218,53 @@ def _estimate_coverage(profile):
     except (ValueError, IndexError, AttributeError):
         income = 200000
     return income * 5  # 年收入 5 倍
+
+
+def _weekly_frequency(monthly_amount: float, risk_tolerance: str) -> int:
+    """
+    决定周投频率：1 或 2 次/周。
+
+    规则：
+      - 月投入 >= 10000 且非保守型 → 2x/周（更平滑的摊平成本）
+      - 其余 → 1x/周
+    """
+    if monthly_amount >= 10000 and risk_tolerance != "low":
+        return 2
+    return 1
+
+
+def _format_weekly_dca(plan: dict, profile: dict) -> str:
+    """
+    格式化周定投任务描述，生成可直接执行的每周操作清单。
+    """
+    model = plan.get("model", "")
+    risk = profile.get("risk_tolerance", "medium")
+
+    if model == "four_account":
+        growth_monthly = plan.get("allocations", {}).get("growth", {}).get("monthly", 0)
+    elif model == "goal_oriented":
+        sub = plan.get("sub_accounts", [{}])[0]
+        growth_monthly = sub.get("monthly_contribution", 0) * 0.70
+    else:
+        growth_monthly = 5000
+
+    if growth_monthly <= 0:
+        growth_monthly = 5000
+
+    freq = _weekly_frequency(growth_monthly, risk)
+    simple_inv = simple_invest_portfolio(growth_monthly, risk)
+
+    weekly_label = "每周 2 次" if freq == 2 else "每周 1 次"
+    total_weekly = _r(growth_monthly / 4.33)
+
+    lines = [f"{weekly_label}定投极简投资组合（合计约 ¥{total_weekly:,.0f}/周），哪天都行："]
+    for name, info in simple_inv["etfs"].items():
+        weekly_per = info["weekly_1x"] if freq == 1 else info["weekly_2x"]
+        if weekly_per > 0:
+            lines.append(f"  · {name}（{info['code']}）：¥{weekly_per:,.0f}/次")
+    lines.append("周几操作都可以，没有心理压力。关键是坚持，不择时。")
+
+    return "\n".join(lines)
 
 
 # ═══════════════════════════════════════════════════════════════

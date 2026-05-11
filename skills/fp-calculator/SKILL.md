@@ -15,6 +15,12 @@ description: 财务规划纯计算模块，被其他 skill 调用，不做对话
 
 ## 速查表
 
+### 现金流诊断
+
+| 场景 | 函数 | 关键参数 |
+|------|------|----------|
+| 现金快照健康度诊断（储蓄率+应急金+趋势） | `cashflow_health(monthly_income, monthly_expense, liquid_savings)` | monthly_income, monthly_expense, liquid_savings |
+
 ### 复利计算
 
 | 场景 | 函数 | 关键参数 |
@@ -43,6 +49,12 @@ description: 财务规划纯计算模块，被其他 skill 调用，不做对话
 | 年度个税计算（含专项附加） | `income_tax(annual_income, city, deductions)` | annual_income, city, deductions dict |
 | 查税率档位 | `tax_bracket(annual_taxable_income)` | annual_taxable_income |
 
+### 投资收益
+
+| 场景 | 函数 | 关键参数 |
+|------|------|----------|
+| 根据持仓市值/收益/收益率互算 | `investment_return(holding_amount, profit_amount=None, return_rate=None)` | holding_amount, profit_amount, return_rate |
+
 ### 资产配置
 
 | 场景 | 函数 | 关键参数 |
@@ -50,6 +62,7 @@ description: 财务规划纯计算模块，被其他 skill 调用，不做对话
 | 月收入四账户分配 | `four_account_allocation(monthly_income)` | monthly_income |
 | 当前持仓 vs 目标配置偏离度 | `allocation_drift(current_alloc, target_alloc)` | current_alloc dict, target_alloc dict |
 | 一笔钱按风险偏好做仓位规划 | `simple_portfolio(amount, goal_return, timeline, risk_tolerance)` | amount, goal_return, timeline, risk_tolerance |
+| 极简投资5 ETF组合（jane7.com） | `simple_invest_portfolio(monthly_amount, risk_tolerance)` | monthly_amount, risk_tolerance |
 
 ---
 
@@ -75,6 +88,20 @@ result = retirement_gap(
 ---
 
 ## 各函数详细说明
+
+### 0. cashflow_health(monthly_income, monthly_expense, liquid_savings)
+
+现金快照即时诊断。用户只需提供 3 个数字，立即获得财务健康度评估。
+
+```
+返回：monthly_savings, savings_rate, savings_rating(优秀/良好/一般/偏低),
+      emergency_coverage_months, emergency_rating(充足/警戒/不足),
+      annual_projection({1年/3年/5年 终值}), suggestions, summary
+```
+
+`savings_rating` 分级：>=30% 优秀、>=15% 良好、>=5% 一般、<5% 偏低
+`emergency_rating` 分级：>=6个月 充足、>=3个月 警戒、<3个月 不足
+`summary` 字段可直接念给用户。
 
 ### 1. fv(pv, rate, years, pmt=0)
 
@@ -198,6 +225,38 @@ target_alloc = {"股票": 0.40, "债券": 0.40, "现金": 0.20}
 - 所有金额结果**保留两位小数**
 - 百分比保留四位小数（如 0.0421 表示 4.21%）
 - `summary` 字段可直接用于用户对话
+
+### 12. investment_return(holding_amount, profit_amount=None, return_rate=None)
+
+投资收益反算。给出持仓市值 + 收益或收益率中的至少一个，自动推导另一个。
+
+```
+返回：holding_amount, cost_basis, profit_amount, return_rate, source, warning
+```
+
+- `source`：`"user_both"`（两个都填了）、`"from_profit"`（从收益反算收益率）、`"from_rate"`（从收益率反算收益）、`"none"`（都没填）
+- `warning`：填写不一致或数据异常时返回告警文字，正常时为 `None`
+- `return_rate` 为简单总收益率（非年化），因为 Excel 中不填持有时间
+- 仅填利润：`cost = amount - profit`, `rate = profit / cost`
+- 仅填收益率：`cost = amount / (1 + rate)`, `profit = amount - cost`
+- 两者同填：用填写值，验算一致性（差异 > 1% 时告警）
+
+### 13. simple_invest_portfolio(monthly_amount, risk_tolerance="medium")
+
+极简投资组合分配，源自 jane7.com"极简投资"方法。5 只 ETF 等权重配置：
+
+- **权益 ETF**：沪深300(510300)、中证500(510500)、标普500(513500)、纳斯达克100(513100)
+- **债券 ETF**：511010
+- 风险调整：保守型 50% 债 + 50% 权益（各 12.5%）、标准型 20% 债 + 80% 权益（各 20%）、进取型 10% 债 + 90% 权益（各 22.5%）
+- 权益之间始终保持等权重，每年再平衡一次
+
+```
+返回：method, source, monthly_amount, weekly_amounts, bond_ratio, equity_ratio,
+      etfs (每只含 code/ratio/monthly_amount/weekly_1x/weekly_2x/type/market),
+      rebalance_frequency, expected_annual_return, rationale, summary
+```
+
+`rationale` 字段包含完整推荐理由，可直接展示给用户。`summary` 是简洁的一句话配置说明。
 
 ## 添加新函数
 

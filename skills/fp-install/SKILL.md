@@ -67,8 +67,8 @@ skills/fp-plan/SKILL.md             → <skills_dir>/fp-plan/SKILL.md
 skills/fp-plan/scripts/             → <skills_dir>/fp-plan/scripts/
 skills/fp-calculator/SKILL.md       → <skills_dir>/fp-calculator/SKILL.md
 skills/fp-calculator/scripts/       → <skills_dir>/fp-calculator/scripts/
-skills/fp-risk-sniff/SKILL.md       → <skills_dir>/fp-risk-sniff/SKILL.md
-skills/fp-risk-sniff/scripts/       → <skills_dir>/fp-risk-sniff/scripts/
+skills/fp-review/SKILL.md         → <skills_dir>/fp-review/SKILL.md
+skills/fp-review/scripts/         → <skills_dir>/fp-review/scripts/
 skills/fp-install/SKILL.md          → <skills_dir>/fp-install/SKILL.md
 ```
 
@@ -114,7 +114,7 @@ python3 ~/.financial-planner/scripts/db_init.py
 □ <skills_dir>/fp-kyc/SKILL.md              存在
 □ <skills_dir>/fp-plan/SKILL.md             存在
 □ <skills_dir>/fp-calculator/SKILL.md       存在
-□ <skills_dir>/fp-risk-sniff/SKILL.md       存在
+□ <skills_dir>/fp-review/SKILL.md         存在
 □ ~/.financial-planner/data.db              存在
 □ ~/.financial-planner/scripts/db_query.py  存在
 ```
@@ -126,7 +126,7 @@ python3 ~/.financial-planner/scripts/db_init.py
 > 现在可以在任何目录说「开始理财」启动你的私人财务规划师。
 >
 > 如果需要彻底卸载，删除两个目录即可：
-> - `<skills_dir>/financial-planner/` + `fp-kyc/` `fp-plan/` `fp-calculator/` `fp-risk-sniff/` `fp-install/`
+> - `<skills_dir>/financial-planner/` + `fp-kyc/` `fp-plan/` `fp-calculator/` `fp-review/` `fp-install/`
 > - `~/.financial-planner/`（含数据库）
 
 ---

@@ -20,13 +20,12 @@ fp-kyc 画像采集工作流封装
 import sys
 import os
 
-# 确保能导入 db_query（从 ~/.financial-planner/scripts/ 或 ../scripts/）
-_script_dir = os.path.dirname(os.path.abspath(__file__))
-_project_scripts = os.path.join(_script_dir, "..", "..", "..", "scripts")
-_user_scripts = os.path.expanduser("~/.financial-planner/scripts")
-for _p in [_project_scripts, _user_scripts]:
-    if _p not in sys.path and os.path.isdir(_p):
-        sys.path.insert(0, _p)
+_exec_dir = os.path.dirname(os.path.abspath(__file__))
+_scripts_dir = os.path.abspath(os.path.join(_exec_dir, "..", "..", "..", "scripts"))
+if _scripts_dir not in sys.path and os.path.isdir(_scripts_dir):
+    sys.path.insert(0, _scripts_dir)
+from _path_setup import init
+init()
 
 import db_query
 
@@ -211,6 +210,329 @@ def skip_field(field_name):
         skipped.append(field_name)
     _save_skipped_fields(skipped)
     return True
+
+
+def save_balance_sheet(balance_sheet: dict, record_date: str = None):
+    """
+    将 load_forms 解析出的资产负债表写入 asset_records 表。
+
+    同一 record_date 的产品先删后插（幂等），避免重复导入。
+
+    Args:
+        balance_sheet: load_forms 返回的 balance_sheet dict，
+                       结构: {"assets": {"现金池": {"total": ..., "items": [...]}, ...},
+                              "liabilities": {...}, "total_assets": ..., ...}
+        record_date: 记录日期，默认今天
+
+    返回:
+        {"saved": int, "record_date": str}
+    """
+    import datetime as _dt
+    if record_date is None:
+        record_date = _dt.date.today().strftime("%Y-%m-%d")
+
+    items = []
+    for pool_name, pool_data in balance_sheet.get("assets", {}).items():
+        for item in pool_data.get("items", []):
+            product_name = item.get("product", "").strip()
+            if not product_name:
+                continue
+            product_code = item.get("code", "") or _product_name_to_code(product_name)
+            platform = item.get("platform", "").strip()
+            amount = float(item.get("amount", 0))
+            profit = float(item.get("profit_amount", 0))
+            rate = item.get("return_rate")  # may be None
+            items.append({
+                "product_code": product_code,
+                "product_name": product_name,
+                "asset_type": _classify_asset_type(product_name, pool_name),
+                "platform": platform,
+                "holding_amount": amount,
+                "profit_amount": profit,
+                "return_rate": rate,
+                "pool": pool_name,
+            })
+
+    if not items:
+        return {"saved": 0, "record_date": record_date}
+
+    # 先删掉同一 record_date 的所有记录（幂等）
+    conn = db_query._connect()
+    try:
+        conn.execute(
+            "DELETE FROM asset_records WHERE record_date = ?", (record_date,)
+        )
+        for item in items:
+            conn.execute(
+                """INSERT INTO asset_records
+                   (product_code, product_name, type, platform, holding_amount,
+                    profit_amount, return_rate, record_date, notes)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (item["product_code"], item["product_name"], item["asset_type"],
+                 item["platform"], item["holding_amount"],
+                 item["profit_amount"], item["return_rate"],
+                 record_date, item["pool"]),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {"saved": len(items), "record_date": record_date}
+
+
+def compare_balance_sheet(new_balance_sheet: dict):
+    """
+    对比新加载的资产负债表与 DB 中最近一次快照的差异。
+
+    Args:
+        new_balance_sheet: load_forms 返回的 balance_sheet dict
+
+    返回:
+        {
+            "has_previous": bool,          # 是否有历史快照可对比
+            "previous_date": str | None,   # 上次快照日期
+            "changes": [                   # 变化列表
+                {"product": str, "platform": str, "change": "new"|"removed"|"amount_changed",
+                 "old_amount": float|None, "new_amount": float|None, "diff": float},
+            ],
+            "summary": str,
+        }
+    """
+    # 获取最近一次快照日期
+    conn = db_query._connect()
+    try:
+        row = conn.execute(
+            "SELECT record_date FROM asset_records ORDER BY record_date DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return {
+                "has_previous": False,
+                "previous_date": None,
+                "changes": [],
+                "summary": "数据库中没有历史资产快照，无法对比",
+            }
+        prev_date = row["record_date"]
+
+        # 获取上次快照的全部记录
+        prev_rows = conn.execute(
+            "SELECT * FROM asset_records WHERE record_date = ?", (prev_date,)
+        ).fetchall()
+        prev_map = {}
+        for r in prev_rows:
+            key = (r["product_name"], r["platform"])
+            prev_map[key] = {
+                "amount": r["holding_amount"],
+                "profit_amount": r["profit_amount"] or 0,
+                "return_rate": r["return_rate"],
+                "pool": r["notes"],
+            }
+    finally:
+        conn.close()
+
+    # 构建新快照的 key → amount 映射
+    new_map = {}
+    for pool_name, pool_data in new_balance_sheet.get("assets", {}).items():
+        for item in pool_data.get("items", []):
+            product_name = item.get("product", "").strip()
+            if not product_name:
+                continue
+            platform = item.get("platform", "").strip()
+            amount = float(item.get("amount", 0))
+            profit = float(item.get("profit_amount", 0))
+            rate = item.get("return_rate")
+            key = (product_name, platform)
+            new_map[key] = {
+                "amount": amount,
+                "profit_amount": profit,
+                "return_rate": rate,
+                "pool": pool_name,
+            }
+
+    changes = []
+    all_keys = set(list(prev_map.keys()) + list(new_map.keys()))
+
+    for key in all_keys:
+        product, platform = key
+        prev = prev_map.get(key)
+        new = new_map.get(key)
+
+        if prev and new:
+            amount_diff = round(new["amount"] - prev["amount"], 2)
+            profit_changed = abs(new["profit_amount"] - prev["profit_amount"]) > 0.01
+            if abs(amount_diff) > 0.01 or profit_changed:
+                changes.append({
+                    "product": product, "platform": platform,
+                    "change": "amount_changed" if abs(amount_diff) > 0.01 else "profit_changed",
+                    "old_amount": prev["amount"], "new_amount": new["amount"], "diff": amount_diff,
+                    "old_profit": prev["profit_amount"], "new_profit": new["profit_amount"],
+                })
+        elif new and not prev:
+            changes.append({
+                "product": product, "platform": platform,
+                "change": "new",
+                "old_amount": None, "new_amount": new["amount"], "diff": new["amount"],
+            })
+        elif prev and not new:
+            changes.append({
+                "product": product, "platform": platform,
+                "change": "removed",
+                "old_amount": prev["amount"], "new_amount": None, "diff": -prev["amount"],
+            })
+
+    summary_parts = []
+    new_count = sum(1 for c in changes if c["change"] == "new")
+    removed_count = sum(1 for c in changes if c["change"] == "removed")
+    changed_count = sum(1 for c in changes if c["change"] == "amount_changed")
+    if new_count:
+        summary_parts.append(f"新增 {new_count} 项")
+    if removed_count:
+        summary_parts.append(f"移除 {removed_count} 项")
+    if changed_count:
+        summary_parts.append(f"金额变化 {changed_count} 项")
+    if not summary_parts:
+        summary_parts.append("无变化")
+
+    return {
+        "has_previous": True,
+        "previous_date": prev_date,
+        "changes": changes,
+        "summary": "；".join(summary_parts),
+    }
+
+
+def _product_name_to_code(name: str) -> str:
+    """从产品名称生成简易 code（基金名 → 六位代码或拼音 slug）"""
+    import re
+    # 尝试提取括号中的基金代码，如 "华夏A500ETF联接C(022431)" → "022431"
+    m = re.search(r"\((\d{4,6})\)", name)
+    if m:
+        return m.group(1)
+    # 否则取前 20 字符做 slug
+    slug = re.sub(r"[^a-zA-Z0-9一-鿿]", "", name)[:20]
+    return slug if slug else name[:20]
+
+
+def _classify_asset_type(product_name: str, pool_name: str) -> str:
+    """根据产品名和所属池推断资产类型"""
+    name_lower = product_name.lower()
+    if any(kw in name_lower for kw in ["etf", "指数", "股票", "qdii", "纳指", "a500", "沪深", "中证", "红利"]):
+        return "fund"
+    if any(kw in name_lower for kw in ["保险", "重疾", "医疗", "意外", "寿险"]):
+        return "insurance"
+    if any(kw in name_lower for kw in ["usdt", "btc", "eth", "加密货币"]):
+        return "other"
+    return "other"
+
+
+def batch_collect_from_form(form_data: dict):
+    """
+    批量采集表单字段，一次性写入 snapshot。
+
+    用于替代逐轮 Q&A 模式——Agent 展示表单，用户填写后，
+    Agent 解析文本提取字段值，调用本函数批量落库。
+
+    Args:
+        form_data: {field_name: value_str, ...}
+                   例：{"income": "2-3万", "age": "30-35", "city": "北京"}
+
+    返回:
+        {
+            "collected": [field_name, ...],       # 成功写入的字段
+            "skipped_existing": [field_name, ...], # 已有 confirmed 数据，跳过
+            "unknown": [field_name, ...],          # 不在 FIELD_DEFS 中的字段
+            "total": int,
+        }
+    """
+    collected = []
+    skipped_existing = []
+    unknown = []
+
+    # 查现有 confirmed 字段，避免覆盖
+    summary = db_query.get_profile_summary()
+    existing_confirmed = set()
+    if summary and summary.get("fields"):
+        for f in summary["fields"]:
+            if f.get("version") == "confirmed":
+                existing_confirmed.add(f["field_name"])
+
+    for field_name, field_value in form_data.items():
+        if field_name not in FIELD_DEFS:
+            unknown.append(field_name)
+            continue
+
+        if field_name in existing_confirmed:
+            skipped_existing.append(field_name)
+            continue
+
+        fd = FIELD_DEFS[field_name]
+        try:
+            db_query.upsert_profile_field(
+                field_name=field_name,
+                field_value=str(field_value),
+                value_type=fd["value_type"],
+                category=fd["category"],
+                version="snapshot",
+            )
+            collected.append(field_name)
+        except Exception:
+            continue
+
+    return {
+        "collected": collected,
+        "skipped_existing": skipped_existing,
+        "unknown": unknown,
+        "total": len(form_data),
+    }
+
+
+def process_form_file(file_path: str):
+    """
+    一站式处理：加载 Excel → 解析 → 批量落库。
+
+    这是 fp-kyc 的主要入口函数。Agent 调一次即可完成全部数据提取和入库。
+
+    Args:
+        file_path: 用户填好的 Excel 文件路径
+
+    返回:
+        {
+            "loaded": load_forms 的完整输出,
+            "collected": batch_collect 结果,
+            "cash_snapshot": {...},
+            "balance_sheet": {...},
+            "ready_for_planning": (bool, level, msg),
+        }
+    """
+    from load_forms import load as _load_forms
+    form_data = _load_forms(file_path)
+
+    if "error" in form_data:
+        return {"error": form_data["error"]}
+
+    profile_fields = form_data.get("profile_fields", {})
+    collect_result = batch_collect_from_form(profile_fields)
+
+    # 保存资产负债表到 asset_records
+    balance_sheet = form_data.get("balance_sheet", {})
+    asset_save_result = {"saved": 0}
+    asset_compare = {"has_previous": False, "changes": [], "summary": ""}
+    if balance_sheet and balance_sheet.get("total_assets", 0) > 0:
+        # 先对比（在保存前，拿到上次快照的差异）
+        asset_compare = compare_balance_sheet(balance_sheet)
+        # 再保存本次快照
+        asset_save_result = save_balance_sheet(balance_sheet)
+
+    ready, level, msg = is_ready_for_planning()
+
+    return {
+        "loaded": form_data,
+        "collected": collect_result,
+        "cash_snapshot": form_data.get("cash_snapshot", {}),
+        "balance_sheet": balance_sheet,
+        "asset_saved": asset_save_result,
+        "asset_compare": asset_compare,
+        "ready_for_planning": (ready, level, msg),
+    }
 
 
 # ────────────────────────────────────────────────────────────
