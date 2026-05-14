@@ -2,6 +2,8 @@
 
 > 面向个人、全生命周期的财务规划 AI Skills 包。
 > 让 Agent 变身为专业的 CFP（注册财务规划师），合理规划和管理个人财产。
+>
+> skills介绍视频：https://www.bilibili.com/video/BV1S65b6BEYn/
 
 ## 项目定位
 

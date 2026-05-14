@@ -84,11 +84,17 @@ python3 skills/fp-kyc/scripts/generate_forms.py 财务画像模板.xlsx
 from calc import cashflow_health
 
 cs = result["cash_snapshot"]
+# liquid_savings 优先取现金快照中的"可动用存款"；
+# 如果用户未填，load_forms 已自动用资产负债表的「现金池」总额兜底
+liquid = cs.get("liquid_savings", 0)
 health = cashflow_health(
     monthly_income=cs["monthly_income"],
     monthly_expense=cs["monthly_expense"],
-    liquid_savings=cs.get("liquid_savings", 0),
+    liquid_savings=liquid,
 )
+
+# 如果 load_forms 中有兜底告警，展示给用户
+warnings = result.get("warnings", [])
 ```
 
 **话术模板：**
@@ -97,6 +103,8 @@ health = cashflow_health(
 > 月收入 ¥{income}，月支出 ¥{expense}，每月净存 ¥{savings}
 > 储蓄率 {rate}% — {rating}
 > 应急金覆盖 {months} 个月 — {em_rating}
+>
+> {如果有兜底告警，这里补充一句：}"注：可动用存款未填，应急金是根据资产负债表现金池估算的。"
 >
 > {逐条建议}
 >

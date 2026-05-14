@@ -390,6 +390,18 @@ def load(file_path):
     bs = result["balance_sheet"]
     rg = result["risk_goals"]
 
+    # 应急金兜底：如果现金快照未填“可动用存款”，
+    # 用资产负债表中“现金池”的汇总金额作为参考
+    if not cs.get("liquid_savings"):
+        cash_pool = bs.get("assets", {}).get("现金池", {})
+        if cash_pool and cash_pool.get("total", 0) > 0:
+            cs["liquid_savings"] = cash_pool["total"]
+            result["warnings"].append(
+                "可动用存款未填写，已根据资产负债表的现金池总额（"
+                f"¥{cash_pool['total']:,.0f}）自动估算应急金。"
+                "如不准确请在现金快照中手动填写。"
+            )
+
     pf = {}
 
     # 现金快照 → profile
